@@ -1,269 +1,293 @@
 package com.angle.word;
 
-import static com.angle.word.WordUtil.*;
-
-import java.io.File;
-import java.io.InputStream;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
-import org.apache.commons.collections.CollectionUtils;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.io.output.ByteArrayOutputStream;
-import org.apache.commons.lang3.StringUtils;
-import org.docx4j.XmlUtils;
-import org.docx4j.dml.chart.CTBarChart;
-import org.docx4j.dml.chart.CTLineChart;
-import org.docx4j.dml.chart.CTLineSer;
-import org.docx4j.dml.chart.CTNumVal;
-import org.docx4j.model.datastorage.migration.VariablePrepare;
+import org.docx4j.dml.chart.*;
+import org.docx4j.jaxb.XPathBinderAssociationIsPartialException;
 import org.docx4j.openpackaging.exceptions.Docx4JException;
-import org.docx4j.openpackaging.io.SaveToZipFile;
+import org.docx4j.openpackaging.io3.Save;
 import org.docx4j.openpackaging.packages.SpreadsheetMLPackage;
 import org.docx4j.openpackaging.packages.WordprocessingMLPackage;
+import org.docx4j.openpackaging.parts.DrawingML.Chart;
 import org.docx4j.openpackaging.parts.Part;
 import org.docx4j.openpackaging.parts.PartName;
-import org.docx4j.openpackaging.parts.DrawingML.Chart;
+import org.docx4j.openpackaging.parts.SpreadsheetML.SharedStrings;
+import org.docx4j.openpackaging.parts.SpreadsheetML.TablePart;
 import org.docx4j.openpackaging.parts.SpreadsheetML.WorksheetPart;
 import org.docx4j.openpackaging.parts.WordprocessingML.EmbeddedPackagePart;
-import org.docx4j.openpackaging.parts.WordprocessingML.MainDocumentPart;
 import org.docx4j.utils.BufferUtil;
-import org.docx4j.wml.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.xlsx4j.sml.CTRst;
 import org.xlsx4j.sml.Cell;
 import org.xlsx4j.sml.Row;
+import org.xlsx4j.sml.STCellType;
 
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
+import javax.xml.bind.JAXBElement;
+import javax.xml.bind.JAXBException;
+import java.io.File;
+import java.io.InputStream;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * 根据已有的word模板文件，替换文件内容来生成新的word文件。</br>
- * 本word文档包含：1. 表格 2. 图表
  */
 public class WordCreate {
 
-    private static final Logger logger      = LoggerFactory.getLogger(WordCreate.class);
+    private static final Logger logger = LoggerFactory.getLogger(WordCreate.class);
 
     /**
-     * word中的表格，表格是可以直接定位的，在word文档中，选中表格，"插入"-"书签"，写上书签名称"T1",这样就可以直接根据书签名称来定位这个表格
+     * 用于匹配excel中的范围字符串，例如：Sheet1!$A$1:$C$3
      */
-    static final String         TABLE1      = "//w:bookmarkStart[@w:name='T1']/ancestor::w:tbl";
-
-    /**
-     * word中第一个图表
-     */
-    static final String         CHART_NAME1 = "/word/charts/chart1.xml";
-
-    /**
-     * word中第一个图表对应的excel
-     */
-    static final String         EXCEL_NAME1 = "/word/embeddings/Microsoft_Excel____1.xlsx";
+    private static final Pattern PATTERN = Pattern.compile("[^!]+!\\$([A-Z]+)\\$([0-9]+):\\$([A-Z]+)\\$([0-9]+)");
 
     public static void main(String[] args) throws Exception {
-
-        // step1 加载模板文档template.docx
-        WordprocessingMLPackage template;
+        List<Map<String, Object>> data = new ObjectMapper().readValue(WordCreate.class.getResourceAsStream("/data.json"), new TypeReference<List<Map<String, Object>>>() {});
+        InputStream inputStream = WordCreate.class.getResourceAsStream("/template.docx");
         try {
-            InputStream inputStream = WordCreate.class.getResourceAsStream("/template.docx");
-            template = WordprocessingMLPackage.load(inputStream);
-
-            // step2 替换标题(其他word文档中的变量都可以这么替换)
-            MainDocumentPart documentPart = template.getMainDocumentPart();
-            VariablePrepare.prepare(template);
-            Map<String, String> titleMap = Maps.newHashMap();
-            titleMap.put("title", "测试");
-            documentPart.variableReplace(titleMap);
-
-            // step3 渲染表格内容
-            setTable(template);
-
-            // step4 渲染图表数据
-            HashMap<PartName, Part> parts = template.getParts().getParts();
-            EmbeddedPackagePart epp = (EmbeddedPackagePart) parts.get(new PartName(EXCEL_NAME1));
-            Chart chart = (Chart) parts.get(new PartName(CHART_NAME1));
-            // 图表数据
-            List<String> counts = Lists.newArrayList();
-            counts.add("389");
-            counts.add("478");
-            counts.add("231");
-            counts.add("897");
-            List<String> percents = Lists.newArrayList();
-            percents.add("0.195");
-            percents.add("0.2396");
-            percents.add("0.1158");
-            percents.add("0.4496");
-            // 渲染图表excel
-            setExcel(epp, counts, percents);
-            // 渲染图表
-            setChart(chart, counts, percents);
-
-            // step5 保存word文档
-            String outputFile = "output.docx";
-            template.save(new File(outputFile));
-
+            generate(data, inputStream);
         } catch (Docx4JException e) {
             logger.error("word create failed.", e);
-
         }
 
     }
 
+    private static void generate(List<Map<String, Object>> data, InputStream inputStream) throws Docx4JException, JAXBException {
+        WordprocessingMLPackage template = WordprocessingMLPackage.load(inputStream);
+
+        // 查找word中所有图表
+        List<Object> chartElements = template.getMainDocumentPart().getJAXBNodesViaXPath("//c:chart", false);
+        for (Object element : chartElements) {
+            // 根据id获取图表对象
+            String chartId = ((CTRelId) ((JAXBElement<?>) element).getValue()).getId();
+            Chart chart = (Chart) template.getMainDocumentPart().getRelationshipsPart().getPart(chartId);
+
+            // 获取内嵌的excel对象
+            CTExternalData externalData = chart.getContents().getExternalData();
+            EmbeddedPackagePart epp = (EmbeddedPackagePart) chart.getRelationshipsPart().getPart(externalData.getId());
+
+            // 更新excel中的数据
+            List<String> columns = updateExcel(epp, data);
+
+            // 更新图表
+            setChart(chart, data, columns);
+        }
+
+        // 保存word文档
+        String outputFile = "output.docx";
+        template.save(new File(outputFile));
+    }
+
     /**
-     * 替换word图表的excel数据
-     *
-     * @param epp
-     * @param counts
-     * @param percents
-     * @throws Docx4JException
+     * 更新excel中的数据，第一行为表头，有几列数据需要在模板中设置
      */
-    private static void setExcel(EmbeddedPackagePart epp, List<String> counts, List<String> percents) {
-        {
-            InputStream is = BufferUtil.newInputStream(epp.getBuffer());
-            SpreadsheetMLPackage spreadSheet;
-            try {
-                spreadSheet = SpreadsheetMLPackage.load(is);
-            } catch (Docx4JException e) {
-                logger.error("excel load failed.", e);
-                return;
-            }
-            Map<PartName, Part> partsMap = spreadSheet.getParts().getParts();
-            for (Map.Entry<PartName, Part> parts2 : partsMap.entrySet()) {
-                if (partsMap.get(parts2.getKey()) instanceof WorksheetPart) {
-                    WorksheetPart wsp = (WorksheetPart) partsMap.get(parts2.getKey());
-                    List<Row> rows = wsp.getJaxbElement().getSheetData().getRow();
-                    for (int i = 1; i < rows.size(); i++) {
-                        Row row = rows.get(i);
-                        List<Cell> cells = row.getC();
-                        if (cells.size() != 3) {
-                            break;
-                        }
-                        cells.get(1).setV(counts.get(i - 1));
-                        cells.get(2).setV(percents.get(i - 1));
+    private static List<String> updateExcel(EmbeddedPackagePart epp, List<Map<String, Object>> data) throws Docx4JException {
+        // 加载excel
+        InputStream is = BufferUtil.newInputStream(epp.getBuffer());
+        SpreadsheetMLPackage spreadSheet = SpreadsheetMLPackage.load(is);
+
+        List<String> columns = null;
+
+        Map<PartName, Part> partsMap = spreadSheet.getParts().getParts();
+        for (Part part : partsMap.values()) {
+            if (part instanceof WorksheetPart) {
+                WorksheetPart wsp = (WorksheetPart) part;
+                List<Row> rows = wsp.getContents().getSheetData().getRow();
+
+                // 获取表头
+                Row headerRow = rows.get(0);
+                columns = headerRow.getC().stream().map(cell -> getCellValue(cell, spreadSheet)).collect(Collectors.toList());
+
+                // 获取内容的第一行
+                Row contentRow = rows.get(1);
+
+                rows.clear();
+                rows.add(headerRow);
+
+                for (int rowIndex = 0; rowIndex < data.size(); rowIndex += 1) {
+                    Map<String, Object> item = data.get(rowIndex);
+                    Row row = new Row();
+                    List<Cell> cells = row.getC();
+
+                    for (int columnIndex = 0; columnIndex < columns.size(); columnIndex += 1) {
+                        Cell cell = new Cell();
+                        // 数据从A列开始
+                        cell.setR(String.valueOf((char) ('A' + columnIndex)) + (rowIndex + 2));
+
+                        // 设置模板中该单元格的属性
+                        Cell contentCell = contentRow.getC().get(columnIndex);
+                        cell.setS(contentCell.getS());
+                        cell.setT(contentCell.getT());
+
+                        // 设置单元格的值
+                        String column = columns.get(columnIndex);
+                        Object value = item.get(column);
+                        setCellValue(cell, value, spreadSheet);
+
+                        cells.add(cell);
                     }
+                    rows.add(row);
                 }
             }
-
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            SaveToZipFile staf = new SaveToZipFile(spreadSheet);
-            try {
-                staf.save(baos);
-            } catch (Docx4JException e) {
-                logger.error("excel save failed.", e);
-                return;
-            }
-            epp.setBinaryData(baos.toByteArray());
         }
+
+        if (columns != null) {
+            for (Part part : partsMap.values()) {
+                if (part instanceof TablePart) {
+                    // 更新表格区域
+                    TablePart tablePart = (TablePart) part;
+                    tablePart.getContents().setRef("A1:" + (char)((columns.size() - 1) + 'A') + (data.size() + 1));
+                }
+            }
+        }
+
+        // 保存Excel
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            Save s = new Save(spreadSheet);
+            s.save(bos);
+            epp.setBinaryData(bos.toByteArray());
+        } catch (Docx4JException e) {
+            logger.error("excel save failed.", e);
+            return null;
+        }
+
+        return columns;
+    }
+
+    /**
+     * 获取单元格的值
+     */
+    private static String getCellValue(Cell cell, SpreadsheetMLPackage spreadSheet) {
+        if (cell.getT() == STCellType.S) {
+            // 查找共享字符串
+            try {
+                SharedStrings sharedStrings = (SharedStrings) spreadSheet.getParts().get(new PartName("/xl/sharedStrings.xml"));
+                CTRst si = sharedStrings.getContents().getSi().get(Integer.parseInt(cell.getV()));
+                return si.getT().getValue();
+            } catch (Docx4JException e) {
+                logger.error("get cell value", e);
+            }
+        }
+        return cell.getV();
+    }
+
+    /**
+     * 设置单元格的值
+     */
+    private static void setCellValue(Cell cell, Object value, SpreadsheetMLPackage spreadSheet) {
+        if (value instanceof String) {
+            try {
+                // 查找共享字符串
+                SharedStrings sharedStrings = (SharedStrings) spreadSheet.getParts().get(new PartName("/xl/sharedStrings.xml"));
+                int index = getSharedStringIndex(sharedStrings.getContents().getSi(), value);
+                if (index >= 0) {
+                    cell.setT(STCellType.S);
+                    cell.setV(String.valueOf(index));
+                } else {
+                    cell.setT(STCellType.STR);
+                    cell.setV(value.toString());
+                }
+            } catch (Docx4JException e) {
+                logger.error("get cell value", e);
+            }
+        } else {
+            cell.setV(value == null ? null : value.toString());
+        }
+    }
+
+    /**
+     * 查找共享字符串下标
+     */
+    private static int getSharedStringIndex(List<CTRst> si, Object value) {
+        for (int i = 0; i < si.size(); i++) {
+            if (value.equals(si.get(i).getT().getValue())) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /**
      * 替换word图表的chart数据
-     *
-     * @param chart
-     * @param counts
-     * @param percents
      */
-    private static void setChart(Chart chart, List<String> counts, List<String> percents) {
-        {
-
-            List<Object> objects;
-            try {
-                objects = chart.getContents().getChart().getPlotArea().getAreaChartOrArea3DChartOrLineChart();
-
-                if (objects.size() >= 1) {
-                    for (Object obj : objects) {
-                        if (obj instanceof CTBarChart) {
-                            CTBarChart ctBarChart = (CTBarChart) obj;
-                            setBarChart(ctBarChart, counts);
-                        }
-                        if (obj instanceof CTLineChart) {
-                            CTLineChart ctLineChart = (CTLineChart) obj;
-                            List<CTLineSer> ctLineSerList = ctLineChart.getSer();
-                            if (CollectionUtils.isNotEmpty(ctLineSerList)) {
-                                CTLineSer ctLineSer = ctLineSerList.get(0);
-                                List<CTNumVal> ctNumValList = ctLineSer.getVal().getNumRef().getNumCache().getPt();
-                                for (int i = 0; i < ctNumValList.size(); i++) {
-                                    CTNumVal ctNumVal = ctNumValList.get(i);
-                                    ctNumVal.setV(percents.get(i));
-                                }
-                            }
-
-                        }
-                    }
-                }
-            } catch (Docx4JException e) {
-                e.printStackTrace();
+    private static void setChart(Chart chart, List<Map<String, Object>> data, List<String> columns) throws JAXBException, XPathBinderAssociationIsPartialException {
+        // 替换数字引用
+        List<Object> numRefList = chart.getJAXBNodesViaXPath("//c:numRef", false);
+        for (Object element : numRefList) {
+            CTNumRef ref = (CTNumRef) element;
+            int[] address = getCellAddress(ref.getF());
+            if (address == null) {
+                continue;
             }
+
+            List<CTNumVal> ptList = ref.getNumCache().getPt();
+            ptList.clear();
+
+            int index = 0;
+            for (Map<String, Object> item : data) {
+                Object value = item.get(columns.get(address[1]));
+                CTNumVal val = new CTNumVal();
+                val.setIdx(index++);
+                val.setV(value == null ? null : value.toString());
+                ptList.add(val);
+            }
+
+            // 根据数据长度重新计算f
+            ref.setF(getNewF(ref.getF(), data.size()));
+        }
+
+        // 替换字符串引用
+        List<Object> strRefList = chart.getJAXBNodesViaXPath("//c:strRef", false);
+        for (Object element : strRefList) {
+            CTStrRef ref = (CTStrRef) element;
+            int[] address = getCellAddress(ref.getF());
+            // 找不到单元格地址，或单元格为表头
+            if (address == null || address[0] == 0) {
+                continue;
+            }
+
+            List<CTStrVal> ptList = ref.getStrCache().getPt();
+            ptList.clear();
+
+            int index = 0;
+            for (Map<String, Object> item : data) {
+                Object value = item.get(columns.get(address[1]));
+                CTStrVal val = new CTStrVal();
+                val.setIdx(index++);
+                val.setV(value == null ? null : value.toString());
+                ptList.add(val);
+            }
+
+            // 根据数据长度重新计算f
+            ref.setF(getNewF(ref.getF(), data.size()));
         }
     }
 
     /**
-     * 渲染表格内容，新增行，并设置单元格内容
-     * 
-     * @param template
-     * @throws Exception
+     * 把单元格字符串地址解析为数字地址
      */
-    private static void setTable(WordprocessingMLPackage template) throws Exception {
-
-        // 表格数据
-        List<String> trDataList = Lists.newArrayList();
-        List<String> trData = Lists.newArrayList();
-        trData.add("张三");
-        trData.add("男");
-        trData.add("35");
-
-        List<String> trData2 = Lists.newArrayList();
-        trData2.add("李四");
-        trData2.add("女");
-        trData2.add("15");
-        trDataList.add(StringUtils.join(trData, ","));
-        trDataList.add(StringUtils.join(trData2, ","));
-
-        // 填充表格
-        List nodes = template.getMainDocumentPart().getJAXBNodesViaXPath(TABLE1, false);
-        Tbl table = (Tbl) XmlUtils.unwrap(nodes.get(0));
-        setTable(table, trDataList);
-
+    private static int[] getCellAddress(String f) {
+        Matcher m = PATTERN.matcher(f);
+        if (m.find()) {
+            return new int[] { Integer.parseInt(m.group(2)) - 1, m.group(1).charAt(0) - 'A' };
+        }
+        return null;
     }
 
-    private static void setTable(Tbl tbl, List<String> trValues) {
-        List<Tr> trList = getTblAllTr(tbl);
-
-        if (CollectionUtils.isEmpty(trList) || CollectionUtils.isEmpty(trValues)) {
-            return;
+    /**
+     * 根据数据长度重新计算f
+     */
+    private static String getNewF(String f, int size) {
+        Matcher m = PATTERN.matcher(f);
+        if (m.find()) {
+            return f.substring(0,m.start(1)) + m.group(1)  + "$2:$" + m.group(3) + "$" + (size + 1);
         }
-        int trSize = trList.size();
-
-        // 获取行首列的单元格格式
-        Tr tr = trList.get(0);
-        Tc tc = getTrAllCell(tr).get(0);
-        TcPr tcPr = tc.getTcPr();
-
-        Tc tc1 = getTrAllCell(tr).get(1);
-        R run = null;
-        List<Object> rList = getAllElementFromObject(tc1, R.class);
-        if (rList != null) {
-            for (Object obj : rList) {
-                if (obj instanceof R) {
-                    run = (R) obj;
-                    break;
-                }
-            }
-        }
-        // 数据格式
-        RPr rpr = run.getRPr();
-        for (String trValue : trValues) {
-            String[] trValueAry = trValue.split(",");
-            // 新增行
-            Tr tr2 = addTrByIndex(tbl, trSize, tcPr);
-            List<Tc> tcList = getTrAllCell(tr2);
-            for (int i = 0; i < tcList.size(); i++) {
-                Tc tc2 = tcList.get(i);
-                setTcContent(tc2, trValueAry[i], rpr);
-            }
-            trSize++;
-        }
-
+        return f;
     }
-
 }
