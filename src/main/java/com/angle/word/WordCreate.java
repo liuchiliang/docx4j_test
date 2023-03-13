@@ -24,8 +24,8 @@ import org.xlsx4j.sml.Cell;
 import org.xlsx4j.sml.Row;
 import org.xlsx4j.sml.STCellType;
 
-import javax.xml.bind.JAXBElement;
-import javax.xml.bind.JAXBException;
+import jakarta.xml.bind.JAXBElement;
+import jakarta.xml.bind.JAXBException;
 import java.io.File;
 import java.io.InputStream;
 import java.util.List;
@@ -47,7 +47,8 @@ public class WordCreate {
     private static final Pattern PATTERN = Pattern.compile("[^!]+!\\$([A-Z]+)\\$([0-9]+):\\$([A-Z]+)\\$([0-9]+)");
 
     public static void main(String[] args) throws Exception {
-        List<Map<String, Object>> data = new ObjectMapper().readValue(WordCreate.class.getResourceAsStream("/data.json"), new TypeReference<List<Map<String, Object>>>() {});
+        List<Map<String, Object>> data = new ObjectMapper().readValue(WordCreate.class.getResourceAsStream("/data.json"), new TypeReference<>() {
+        });
         InputStream inputStream = WordCreate.class.getResourceAsStream("/template.docx");
         try {
             generate(data, inputStream);
@@ -238,6 +239,11 @@ public class WordCreate {
                 ptList.add(val);
             }
 
+            // ptCount
+            CTUnsignedInt ptCount = new CTUnsignedInt();
+            ptCount.setVal(data.size());
+            ref.getNumCache().setPtCount(ptCount);
+
             // 根据数据长度重新计算f
             ref.setF(getNewF(ref.getF(), data.size()));
         }
@@ -263,6 +269,11 @@ public class WordCreate {
                 val.setV(value == null ? null : value.toString());
                 ptList.add(val);
             }
+
+            // ptCount
+            CTUnsignedInt ptCount = new CTUnsignedInt();
+            ptCount.setVal(data.size());
+            ref.getStrCache().setPtCount(ptCount);
 
             // 根据数据长度重新计算f
             ref.setF(getNewF(ref.getF(), data.size()));
